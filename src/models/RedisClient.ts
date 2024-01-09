@@ -1,19 +1,34 @@
 import { createClient, RedisClientType } from 'redis'
 import debug from 'debug'
 
-const log = debug('redis-client')
+const DEBUGGER = debug('redis-client')
 
 const DELETED = '__DELETED__'
 
-const logError = (err: unknown) => log(err)
+const log = {
+  error: (err: unknown) => DEBUGGER(err),
+  info: (msg: unknown) => DEBUGGER(msg),
+}
 
-class RedisClient {
+interface RedisClientState {
+  get<T = any>(key: string): Promise<T | null>
+
+  set(key: string, value: any): Promise<string | null>
+
+  del(key: string, soft?: boolean): Promise<void>
+
+  incr(key: string): Promise<number>
+
+  expire(key: string, seconds: number): Promise<boolean>
+}
+
+class RedisClient implements RedisClientState {
   url: string
   client: RedisClientType
   isConnected: boolean
 
   constructor(url: string) {
-    const client = createClient({ url }).on('error', logError)
+    const client = createClient({ url }).on('error', log.error)
 
     this.url = url
     this.client = client as RedisClientType
@@ -25,17 +40,17 @@ class RedisClient {
       await this.client.connect()
       this.isConnected = true
 
-      log('Redis connected')
+      log.info('Redis connected')
     }
   }
 
-  async get(key: string) {
+  async get<T = any>(key: string) {
     await this.connect()
 
     const data = await this.client.get(key)
 
     try {
-      return JSON.parse(data as string)
+      return JSON.parse(data as string) as T
     } catch {
       return null
     }
@@ -43,14 +58,17 @@ class RedisClient {
 
   async set(key: string, value: any) {
     await this.connect()
-
     return this.client.set(key, JSON.stringify(value))
   }
 
-  async del(key: string) {
+  async del(key: string, soft = false) {
     await this.connect()
 
-    return this.client.del(key)
+    if (soft) {
+      await this.client.set(key, DELETED)
+    } else {
+      await this.client.del(key)
+    }
   }
 
   async incr(key: string) {
@@ -63,50 +81,6 @@ class RedisClient {
     await this.connect()
 
     return this.client.expire(key, seconds)
-  }
-
-  async rateLimit(key: string, limit: number, seconds: number): Promise<boolean> {
-    await this.connect()
-
-    const res = await this.client.incr(key)
-
-    if (res === 1) {
-      await this.client.expire(key, seconds)
-    }
-
-    return res >= limit
-  }
-
-  async getCache(key: string, query: () => Promise<any>, time: number | null = null) {
-    const obj = await this.get(key)
-
-    if (obj === DELETED) {
-      return null
-    }
-
-    if (!obj && query) {
-      return query().then(async (data) => {
-        if (data) {
-          await this.set(key, data)
-
-          if (time !== null) {
-            await this.expire(key, time)
-          }
-        }
-
-        return data
-      })
-    }
-
-    return obj
-  }
-
-  async setCache(key: string, data: any) {
-    return this.set(key, data)
-  }
-
-  async deleteCache(key: string, soft = false) {
-    return soft ? this.set(key, DELETED) : this.del(key)
   }
 }
 
